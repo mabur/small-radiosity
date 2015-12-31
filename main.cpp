@@ -1,16 +1,14 @@
-// SmallRadiosity by Magnus Burenius
-#include <iostream>	// Not needed for minimal
-#include <fstream>
-#include <math.h>
-#include <valarray>
+// small-radiosity by Magnus Burenius
 #include <algorithm>
+#include <functional>
 #include <numeric>
 #include <random>
-#include <functional>
+#include <valarray>
+#include <fstream>
+#include <iostream>
 #include <sstream>
-#include <vector>
 using namespace std;
-//// Fast settings:
+// Fast settings:
 const auto S            = 20;		    // Number of patches per rect is S*S.			// SCENE
 const auto PHOTONS      = 10000;	    // 300000;//30000;	// Number of particles used for each color component	// COMPUTE RADIOSITY
 const auto WIDTH        = 250.0;		// Width of image		// RENDERING
@@ -87,29 +85,31 @@ struct Scene // Define the Cornell box:
 // Information about an intersection between a ray and a Rect:
 struct Intersection
 {
-    double dist, u, v;  // Distance to intersection and its u and v coordinates.
-    vec pos;            // Intersection point.
-    int rectIndex;      // Index of intersecting Rect.
-    Intersection() : dist{numeric_limits<double>::max()} {}
-    operator bool() const { return dist < numeric_limits<double>::max(); }
+    double distance;
+    double u; // 0-1 coordinate of the intersection within the rectangle.
+    double v; // 0-1 coordinate of the intersection within the rectangle.
+    vec position;
+    int rectangleIndex;
+    Intersection() : distance{numeric_limits<double>::max()} {}
+    operator bool() const { return distance < numeric_limits<double>::max(); }
 };
-// Compute the first intersections along a ray:
+// Compute the first intersection along a ray:
 Intersection ComputeIntersection(const Scene& scene, vec start, vec dir)
 {
     const auto e = 0.0001;
     start += e * dir;
-    dir = normalized( dir );
+    dir = normalized(dir);
     auto firstIntersection = Intersection();
-    for (auto r = 0; r < Scene::NUM_RECTANGLES; ++r) // TODO: range?
-    {	// Check quad ray intersection:
+    for (auto r = 0; r < Scene::NUM_RECTANGLES; ++r)
+    {
         const auto& rectangle = scene.rectangles[r];
         auto i = Intersection();
-        i.dist = dot(rectangle.p - start, rectangle.n) / dot(dir, rectangle.n);
-        if (i.dist < 0 || firstIntersection.dist < i.dist)
+        i.distance = dot(rectangle.p - start, rectangle.n) / dot(dir, rectangle.n);
+        if (i.distance < 0 || firstIntersection.distance < i.distance)
             continue;
-        i.rectIndex = r;
-        i.pos = start + i.dist * dir;
-        const auto p = i.pos - rectangle.p;
+        i.rectangleIndex = r;
+        i.position = start + i.distance * dir;
+        const auto p = i.position - rectangle.p;
         i.u = dot(p, rectangle.x) / dot(rectangle.x, rectangle.x);
         i.v = dot(p, rectangle.y) / dot(rectangle.y, rectangle.y);
         if (0 - e < i.u && i.u < 1 + e && 0 - e < i.v && i.v < 1 + e)
@@ -122,7 +122,7 @@ int Patch(const Intersection& i, double du = 0, double dv = 0)
 {
     const auto ui = max(min(int((i.u + du) * S), S - 1), 0);
     const auto vi = max(min(int((i.v + dv) * S), S - 1), 0);
-    return ui + vi * S + i.rectIndex * S * S;
+    return ui + vi * S + i.rectangleIndex * S * S;
 }
 // Get an "interpolated" value for the radiosity using gaussian samples:
 vec Radiosity(const Scene& scene, const Intersection& i)
@@ -133,7 +133,7 @@ vec Radiosity(const Scene& scene, const Intersection& i)
     //return B[Patch(i)]; // No interpolation
     // Gaussian filter:
     for (auto s = 0; s < DRAW_SAMPLES; ++s)
-        r += scene.B[ Patch(i, DRAW_STD * g(), DRAW_STD * g()) ];
+        r += scene.B[Patch(i, DRAW_STD * g(), DRAW_STD * g())];
     return r / double(DRAW_SAMPLES);
 }
 // Third component is assumed to be in the direction of the normal:
@@ -142,25 +142,24 @@ vec RandomDiffuseReflectionDir()
     const auto a = u();
     return sqrt(a) * normalized(vec{g(), g(), 0}) + sqrt(1 - a) * vec{0, 0, 1};
 }
-
+// Compute the radiosity of the scene by bouncing around photons.
 void ComputeRadiosity(Scene& scene)
 {
     for (auto c = 0; c < 3; ++c)
     {
-        for (auto p = 0; p < PHOTONS; ++p) // Generate lines/rays:
+        for (auto p = 0; p < PHOTONS; ++p)
         {
-            // Set initial photon position and direction:
-            auto start = scene.lightPos;
-            auto dir   = normalized(vec{g(), g(), g()});
-            auto i     = ComputeIntersection(scene, start, dir);
+            auto ray_dir = normalized(vec{g(), g(), g()});
+            auto ray_start = scene.lightPos;
+            auto i = ComputeIntersection(scene, ray_start, ray_dir);
             while (i && u() < scene.R[Patch(i)][c])
             {
-                const auto& r = scene.rectangles[i.rectIndex];
+                const auto& r = scene.rectangles[i.rectangleIndex];
                 scene.B[Patch(i)][c] += scene.lightPower[c] / PHOTONS * S * S / r.a;
-                start = i.pos;
                 const auto d = RandomDiffuseReflectionDir();
-                dir = r.xn * d[0] + r.yn * d[1] + r.nn * d[2];
-                i = ComputeIntersection(scene, start, dir);
+                ray_dir = r.xn * d[0] + r.yn * d[1] + r.nn * d[2];
+                ray_start = i.position;
+                i = ComputeIntersection(scene, ray_start, ray_dir);
             }
         }
     }
