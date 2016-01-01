@@ -11,36 +11,43 @@ using namespace std;
 // Fast settings:
 const auto S            = 20;		    // Number of patches per rect is S*S.			// SCENE
 const auto PHOTONS      = 10000;	    // 300000;//30000;	// Number of particles used for each color component	// COMPUTE RADIOSITY
+const auto DRAW_SAMPLES = 20;		    // Number of gaussian samples used for drawing.	// RENDERING
 const auto WIDTH        = 250.0;		// Width of image		// RENDERING
 const auto HEIGHT       = 250.0;		// Height of image		// RENDERING
-const auto DRAW_SAMPLES = 20;		    // Number of gaussian samples used for drawing.	// RENDERING
-const auto DRAW_STD     = 0.5 / S;	    // STD of gaussian filter						// RENDERING (this could be a hidden parameter)
 // Slow settings:
-//const auto S				= 64;//30;	// Number of patches per rect is S*S.
-//const auto WIDTH			= 4096.0;	// Width of image
-//const auto HEIGHT			= 4096.0;	// Height of image
-//const auto PHOTONS		= 100000000;// Number of particles used for each color component
-//const auto DRAW_SAMPLES	= 100;		// Number of gaussian samples used for drawing.
-//const auto DRAW_STD		= 0.5/S;	// STD of gaussian filter
+//const auto S            = 64;//30;    // Number of patches per rect is S*S.
+//const auto PHOTONS      = 100000000;  // Number of particles used for each color component
+//const auto DRAW_SAMPLES = 100;        // Number of gaussian samples used for drawing.
+//const auto WIDTH        = 4096.0;     // Width of image
+//const auto HEIGHT       = 4096.0;     // Height of image
 auto g = bind(      normal_distribution<double>(), mt19937());
 auto u = bind(uniform_real_distribution<double>(), mt19937());
 // Definition of vector type:
 using vec = valarray<double>;
-double dot(const vec& a, const vec& b) { return (a * b).sum(); }
-vec normalized(const vec& v) { return v / sqrt( dot(v,v) ); }
+double dot(vec a, vec b)
+{
+    return (a * b).sum();
+}
+vec normalized(vec v)
+{
+    return v / sqrt(dot(v, v));
+}
+vec crossProduct(vec x, vec y)
+{
+    return vec{x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]};
+}
 // Used to describe the geometrical properties of a rectangular surface:
 struct Rect
 {
-    vec p;		// A corner in the rectangle.
-    vec x;		// Vector going from p to the right nearby corner.
-    vec y;		// Vector going from p to the top nearby corner.
-    vec n;		// Normal of the plane. The cross product of x and y.
-    vec xn;     // normalized(x)
-    vec yn;		// normalized(y)
-    vec nn;		// normalized(n)
-    double a;	// Area of rectangle. Given by length of x cross y.
-    Rect(vec P, vec X, vec Y) : p{P}, x{X}, y{Y},
-        n{vec{x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]}},
+    vec p;      // A corner in the rectangle.
+    vec x;      // Vector going from p to the right nearby corner.
+    vec y;      // Vector going from p to the top nearby corner.
+    vec n;      // Normal of the plane. The cross product of x and y.
+    vec xn;     // normalized(x).
+    vec yn;     // normalized(y).
+    vec nn;     // normalized(n).
+    double a;   // Area of rectangle. Given by length of x cross y.
+    Rect(vec P, vec X, vec Y) : p{P}, x{X}, y{Y}, n{crossProduct(x, y)},
         xn{normalized(x)}, yn{normalized(y)}, nn{normalized(n)}, a{sqrt(dot(n, n))} {}
 };
 const auto L = 555.0; // Length of Cornell Box side.
@@ -71,7 +78,7 @@ struct Scene // Define the Cornell box:
     // The color quantities for each patch:
     // TODO: rename?
     valarray<vec> R{ .75 * vec{ 1, 1, 1 }, NUM_PATCHES }; // Reflectance for each patch
-    valarray<vec> B{ vec{ 0, 0, 0 }, NUM_PATCHES };       // Radiosity for each patch
+    valarray<vec> B{       vec{ 0, 0, 0 }, NUM_PATCHES }; // Radiosity for each patch
 
     vec lightPos   =    L * vec{ .5, .8, .5 };
     vec lightPower = 1e11 * vec{  1,  1,  1 };
@@ -104,7 +111,7 @@ Intersection ComputeIntersection(const Scene& scene, vec start, vec dir)
     {
         const auto& rectangle = scene.rectangles[r];
         auto i = Intersection();
-        i.distance = dot(rectangle.p - start, rectangle.n) / dot(dir, rectangle.n);
+        i.distance = dot(rectangle.p - start, rectangle.nn) / dot(dir, rectangle.nn);
         if (i.distance < 0 || firstIntersection.distance < i.distance)
             continue;
         i.rectangleIndex = r;
@@ -117,12 +124,16 @@ Intersection ComputeIntersection(const Scene& scene, vec start, vec dir)
     }
     return firstIntersection;
 }
+int RectToPatch(int rect_index, int rect_patch_u, int rect_path_v)
+{
+    return rect_patch_u + rect_path_v * S + rect_index * S * S;
+}
 // Get patch index of an intersection, with an optional u and v offset:
 int Patch(const Intersection& i, double du = 0, double dv = 0)
 {
-    const auto ui = max(min(int((i.u + du) * S), S - 1), 0);
-    const auto vi = max(min(int((i.v + dv) * S), S - 1), 0);
-    return ui + vi * S + i.rectangleIndex * S * S;
+    const auto rect_path_u = max(min(int((i.u + du) * S), S - 1), 0);
+    const auto rect_path_v = max(min(int((i.v + dv) * S), S - 1), 0);
+    return RectToPatch(i.rectangleIndex, rect_path_u, rect_path_v);
 }
 // Get an "interpolated" value for the radiosity using gaussian samples:
 vec Radiosity(const Scene& scene, const Intersection& i)
@@ -132,32 +143,41 @@ vec Radiosity(const Scene& scene, const Intersection& i)
         return r;
     //return B[Patch(i)]; // No interpolation
     // Gaussian filter:
+    const auto DRAW_STD = 0.5 / S; // STD of gaussian filter.
     for (auto s = 0; s < DRAW_SAMPLES; ++s)
         r += scene.B[Patch(i, DRAW_STD * g(), DRAW_STD * g())];
     return r / double(DRAW_SAMPLES);
 }
-// Third component is assumed to be in the direction of the normal:
-vec RandomDiffuseReflectionDir()
+vec RandomDiffuseReflectionDirection(vec tangent1, vec tangent2, vec normal)
 {
     const auto a = u();
-    return sqrt(a) * normalized(vec{g(), g(), 0}) + sqrt(1 - a) * vec{0, 0, 1};
+    const auto dir = sqrt(a) * normalized(vec{g(), g(), 0}) + vec{0, 0, sqrt(1 - a)};
+    return tangent1 * dir[0] + tangent2 * dir[1] + normal * dir[2];
 }
+vec RandomDirection()
+{
+    return normalized(vec{ g(), g(), g() });
+}
+bool PhotonIsAbsorbed(double reflectance)
+{
+    return u() > reflectance;
+}
+const auto NUM_COLOR_CHANNELS = 3;
 // Compute the radiosity of the scene by bouncing around photons.
 void ComputeRadiosity(Scene& scene)
 {
-    for (auto c = 0; c < 3; ++c)
+    for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
     {
         for (auto p = 0; p < PHOTONS; ++p)
         {
-            auto ray_dir = normalized(vec{g(), g(), g()});
+            auto ray_dir = RandomDirection();
             auto ray_start = scene.lightPos;
             auto i = ComputeIntersection(scene, ray_start, ray_dir);
-            while (i && u() < scene.R[Patch(i)][c])
+            while (i && !PhotonIsAbsorbed(scene.R[Patch(i)][c]))
             {
                 const auto& r = scene.rectangles[i.rectangleIndex];
                 scene.B[Patch(i)][c] += scene.lightPower[c] / PHOTONS * S * S / r.a;
-                const auto d = RandomDiffuseReflectionDir();
-                ray_dir = r.xn * d[0] + r.yn * d[1] + r.nn * d[2];
+                ray_dir = RandomDiffuseReflectionDirection(r.xn, r.yn, r.nn);
                 ray_start = i.position;
                 i = ComputeIntersection(scene, ray_start, ray_dir);
             }
@@ -178,16 +198,12 @@ void Render(const Scene& scene, vec cameraPos, double focalLength, const char* f
     {
         for (auto x = 0.0; x < WIDTH; ++x)
         {
-            const auto pixelDir = vec{WIDTH / 2 - x, HEIGHT / 2 - y, focalLength};
-            const auto color = Radiosity(scene, ComputeIntersection(scene, cameraPos, pixelDir));
-            for (auto c = 0; c < 3; ++c)
+            const auto rayDir = vec{WIDTH / 2 - x, HEIGHT / 2 - y, focalLength};
+            const auto color = Radiosity(scene, ComputeIntersection(scene, cameraPos, rayDir));
+            for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
                 file << ScreenColor(color[c]) << " ";
         }
     }
-}
-int RectToPatch(int r, int i, int j)
-{
-    return i + j * S + r * S * S;
 }
 void SaveLightmaps(const Scene& scene, const char* fileNameStart)
 {
@@ -202,7 +218,7 @@ void SaveLightmaps(const Scene& scene, const char* fileNameStart)
             for (auto x = 0; x < S; ++x)
             {
                 const auto color = scene.B[RectToPatch(r, x, y)];
-                for (auto c = 0; c < 3; ++c)
+                for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
                     file << ScreenColor(color[c]) << " ";
             }
         }
