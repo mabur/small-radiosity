@@ -28,13 +28,17 @@ double dot(vec a, vec b)
 {
     return (a * b).sum();
 }
-vec normalized(vec v)
+double norm(vec a)
 {
-    return v / sqrt(dot(v, v));
+    return sqrt(dot(a, a));
 }
-vec crossProduct(vec x, vec y)
+vec normalized(vec a)
 {
-    return vec{x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]};
+    return a / norm(a);
+}
+vec crossProduct(vec a, vec b)
+{
+    return vec{a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
 }
 // Used to describe the geometrical properties of a rectangular surface:
 struct Rect
@@ -48,18 +52,27 @@ struct Rect
     vec nn;     // normalized(n).
     double a;   // Area of rectangle. Given by length of x cross y.
     Rect(vec P, vec X, vec Y) : p{P}, x{X}, y{Y}, n{crossProduct(x, y)},
-        xn{normalized(x)}, yn{normalized(y)}, nn{normalized(n)}, a{sqrt(dot(n, n))} {}
+        xn{normalized(x)}, yn{normalized(y)}, nn{normalized(n)}, a{ norm(n)} {}
 };
 const auto L = 555.0; // Length of Cornell Box side.
+const auto BLACK = vec{ 0, 0, 0 };
+const auto WHITE = vec{ .75, .75, .75 };
+const auto RED   = vec{ .75, .25, .25 };
+const auto GREEN = vec{ .25, .75, .25 };
 struct Scene // Define the Cornell box:
 {
     static const auto NUM_RECTANGLES = 15;
     static const auto NUM_PATCHES = NUM_RECTANGLES * S * S;
 
+    static int rectToPatch(int rect_index, int rect_patch_u, int rect_path_v)
+    {
+        return rect_patch_u + rect_path_v * S + rect_index * S * S;
+    }
+
     Rect rectangles[NUM_RECTANGLES] = {
         Rect{ vec{ 0, 0, 0 }, vec{  0, 0, L }, vec{ L, 0, 0 } },    // Floor
         Rect{ vec{ 0, L, 0 }, vec{  L, 0, 0 }, vec{ 0, 0, L } },    // Ceiling
-        Rect{ vec{ L, 0, L }, vec{ -L, 0, 0 }, vec{ 0, L, 0 } },	    // Back wall
+        Rect{ vec{ L, 0, L }, vec{ -L, 0, 0 }, vec{ 0, L, 0 } },	// Back wall
         Rect{ vec{ 0, 0, 0 }, vec{  0, L, 0 }, vec{ 0, 0, L } },    // Right wall
         Rect{ vec{ L, 0, 0 }, vec{  0, 0, L }, vec{ 0, L, 0 } },    // Left wall
         // Tall block:
@@ -76,18 +89,24 @@ struct Scene // Define the Cornell box:
         Rect{ vec{ 239,   0, 272 }, vec{   49, 0, -158 }, vec{   0, 165,    0 } } };
 
     // The color quantities for each patch:
-    // TODO: rename?
-    valarray<vec> R{ .75 * vec{ 1, 1, 1 }, NUM_PATCHES }; // Reflectance for each patch
-    valarray<vec> B{       vec{ 0, 0, 0 }, NUM_PATCHES }; // Radiosity for each patch
-
-    vec lightPos   =    L * vec{ .5, .8, .5 };
-    vec lightPower = 1e11 * vec{  1,  1,  1 };
+    valarray<vec> reflectance{ WHITE, NUM_PATCHES }; // Reflectance for each patch
+    valarray<vec>   radiosity{ BLACK, NUM_PATCHES }; // Radiosity for each patch
 
     Scene()
     {
-        fill(&R[3 * S * S], &R[4 * S * S], vec{ .25, .75, .25 }); // Color right wall
-        fill(&R[4 * S * S], &R[5 * S * S], vec{ .75, .25, .25 }); // Color left wall
+        fill(&reflectance[rectToPatch(3, 0, 0)], &reflectance[rectToPatch(4, 0, 0)], GREEN); // Color right wall
+        fill(&reflectance[rectToPatch(4, 0, 0)], &reflectance[rectToPatch(5, 0, 0)], RED); // Color left wall
     }
+};
+struct Light
+{
+    vec position = L * vec{ .5, .8, .5 };
+    vec power = 1e11 * vec{ 1,  1,  1 };
+};
+struct Camera
+{
+    vec position = L * vec{ .5, .5, -1.4 };
+    double focalLength = 1.4 * WIDTH;
 };
 // Information about an intersection between a ray and a Rect:
 struct Intersection
@@ -101,7 +120,7 @@ struct Intersection
     operator bool() const { return distance < numeric_limits<double>::max(); }
 };
 // Compute the first intersection along a ray:
-Intersection ComputeIntersection(const Scene& scene, vec start, vec dir)
+Intersection findIntersection(const Scene& scene, vec start, vec dir)
 {
     const auto e = 0.0001;
     start += e * dir;
@@ -124,118 +143,113 @@ Intersection ComputeIntersection(const Scene& scene, vec start, vec dir)
     }
     return firstIntersection;
 }
-int RectToPatch(int rect_index, int rect_patch_u, int rect_path_v)
-{
-    return rect_patch_u + rect_path_v * S + rect_index * S * S;
-}
 // Get patch index of an intersection, with an optional u and v offset:
-int Patch(const Intersection& i, double du = 0, double dv = 0)
+int patchIndex(const Intersection& i, double du = 0, double dv = 0)
 {
     const auto rect_path_u = max(min(int((i.u + du) * S), S - 1), 0);
     const auto rect_path_v = max(min(int((i.v + dv) * S), S - 1), 0);
-    return RectToPatch(i.rectangleIndex, rect_path_u, rect_path_v);
+    return Scene::rectToPatch(i.rectangleIndex, rect_path_u, rect_path_v);
 }
 // Get an "interpolated" value for the radiosity using gaussian samples:
-vec Radiosity(const Scene& scene, const Intersection& i)
+vec sampleRadiosity(const Scene& scene, const Intersection& i)
 {
-    auto r = vec{0, 0, 0};
+    auto r = BLACK;
     if (!i)
         return r;
-    //return B[Patch(i)]; // No interpolation
+    //return B[patchIndex(i)]; // No interpolation
     // Gaussian filter:
     const auto DRAW_STD = 0.5 / S; // STD of gaussian filter.
     for (auto s = 0; s < DRAW_SAMPLES; ++s)
-        r += scene.B[Patch(i, DRAW_STD * g(), DRAW_STD * g())];
+        r += scene.radiosity[patchIndex(i, DRAW_STD * g(), DRAW_STD * g())];
     return r / double(DRAW_SAMPLES);
 }
-vec RandomDiffuseReflectionDirection(vec tangent1, vec tangent2, vec normal)
+vec randomDirection()
+{
+    return normalized(vec{ g(), g(), g() });
+}
+vec randomDiffuseReflectionDirection(vec tangent1, vec tangent2, vec normal)
 {
     const auto a = u();
     const auto dir = sqrt(a) * normalized(vec{g(), g(), 0}) + vec{0, 0, sqrt(1 - a)};
     return tangent1 * dir[0] + tangent2 * dir[1] + normal * dir[2];
 }
-vec RandomDirection()
-{
-    return normalized(vec{ g(), g(), g() });
-}
-bool PhotonIsAbsorbed(double reflectance)
+bool isPhotonAbsorbed(double reflectance)
 {
     return u() > reflectance;
 }
 const auto NUM_COLOR_CHANNELS = 3;
 // Compute the radiosity of the scene by bouncing around photons.
-void ComputeRadiosity(Scene& scene)
+void illuminateScene(Scene& scene, const Light& light)
 {
     for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
     {
         for (auto p = 0; p < PHOTONS; ++p)
         {
-            auto ray_dir = RandomDirection();
-            auto ray_start = scene.lightPos;
-            auto i = ComputeIntersection(scene, ray_start, ray_dir);
-            while (i && !PhotonIsAbsorbed(scene.R[Patch(i)][c]))
+            auto ray_dir = randomDirection();
+            auto ray_start = light.position;
+            auto i = findIntersection(scene, ray_start, ray_dir);
+            while (i && !isPhotonAbsorbed(scene.reflectance[patchIndex(i)][c]))
             {
                 const auto& r = scene.rectangles[i.rectangleIndex];
-                scene.B[Patch(i)][c] += scene.lightPower[c] / PHOTONS * S * S / r.a;
-                ray_dir = RandomDiffuseReflectionDirection(r.xn, r.yn, r.nn);
+                scene.radiosity[patchIndex(i)][c] += light.power[c] / PHOTONS * S * S / r.a;
+                ray_dir = randomDiffuseReflectionDirection(r.xn, r.yn, r.nn);
                 ray_start = i.position;
-                i = ComputeIntersection(scene, ray_start, ray_dir);
+                i = findIntersection(scene, ray_start, ray_dir);
             }
         }
     }
 }
 // Do gamma correction and truncation of color:
-int ScreenColor(double c)
+int screenColor(double c)
 {
     return min(int(pow(c, 1 / 2.2)), 255);
 }
 // Render the image to a ppm-file:
-void Render(const Scene& scene, vec cameraPos, double focalLength, const char* filename)
+void renderCameraImage(const Scene& scene, const Camera& camera, const char* filename)
 {
     ofstream file(filename);
-    file << "P3\n" << int(WIDTH) << " " << int(HEIGHT) << "\n255\n";
+    file << "P3" << endl << int(WIDTH) << " " << int(HEIGHT) << endl << "255" << endl;
     for (auto y = 0.0; y < HEIGHT; ++y)
     {
         for (auto x = 0.0; x < WIDTH; ++x)
         {
-            const auto rayDir = vec{WIDTH / 2 - x, HEIGHT / 2 - y, focalLength};
-            const auto color = Radiosity(scene, ComputeIntersection(scene, cameraPos, rayDir));
+            const auto rayDir = vec{WIDTH / 2 - x, HEIGHT / 2 - y, camera.focalLength};
+            const auto intersection = findIntersection(scene, camera.position, rayDir);
+            const auto radiosity = sampleRadiosity(scene, intersection);
             for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
-                file << ScreenColor(color[c]) << " ";
+                file << screenColor(radiosity[c]) << " ";
         }
     }
 }
-void SaveLightmaps(const Scene& scene, const char* fileNameStart)
+void saveLightmaps(const Scene& scene)
 {
     for (auto r = 0; r < Scene::NUM_RECTANGLES; ++r)
     {
-        auto ss = stringstream();
-        ss << fileNameStart << r << ".ppm";
-        auto file = ofstream(ss.str());
+        const auto filename = "lightmap" + std::to_string(r) +  ".ppm";
+        auto file = ofstream(filename);
         file << "P3" << endl << S << " " << S << endl << 255 << endl;
         for (auto y = 0; y < S; ++y)
         {
             for (auto x = 0; x < S; ++x)
             {
-                const auto color = scene.B[RectToPatch(r, x, y)];
+                const auto radiosity = scene.radiosity[scene.rectToPatch(r, x, y)];
                 for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
-                    file << ScreenColor(color[c]) << " ";
+                    file << screenColor(radiosity[c]) << " ";
             }
         }
     }
 }
-// Here we go:
 int main()
 {
-    auto scene = Scene();
-    cout << "Computing radiosity." << endl;
-    ComputeRadiosity(scene);
+    auto scene = Scene{};
+    auto light = Light{};
+    auto camera = Camera{};
+    cout << "Illuminating the scene." << endl;
+    illuminateScene(scene, light);
     cout << "Saving lightmaps to files." << endl;
-    SaveLightmaps(scene, "lightmap");
-    cout << "Rendering image to file." << endl;
-    const auto focalLength = 1.4 * WIDTH;
-    const auto cameraPos = L * vec{.5, .5, -1.4};
-    Render(scene, cameraPos, focalLength, "image.ppm");
+    saveLightmaps(scene);
+    cout << "Rendering camera image to file." << endl;
+    renderCameraImage(scene, camera, "cameraImage.ppm");
 }
 
 
