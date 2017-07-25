@@ -1,0 +1,629 @@
+ **Radiosity in 200 lines of C++**
+
+Radiosity is a method to render a scene realistically by simulating the laws of physics. It computes a viewpoint independent representation of the illumination. A useful application of it is to precompute light-maps for a static scene, i.e. surface textures containing the illumination. These can then be used with a standard rasterizer, like OpenGL or Direct3D, to render the scene in real-time from different viewpoints.
+
+Inspired by the <a href="http://kevinbeason.com/smallpt/">smallpt</a> path tracer written in 99 lines of C++, I wanted to see how short and simple I could implement radiosity. You can find the result below, written in 200 lines that are hopefully quite easy to read. You can also find an introduction to the method and a full description of this implementation in <a href="radiosity.pdf">this pdf</a>. The code renders the <a href="http://www.graphics.cornell.edu/online/box/">Cornel box</a> which is included in the source:
+
+![The computed illumination for all patches of the scene.](images/cornell_box_patches_big.png) ![The illumination is interpolated between patches.](images/cornell_box_big.png)
+
+The images above were rendered over night. If you want to try a fast test rendering you can change some of the constants in the code:
+
+````````````````````````````````````````````````````````
+// Fast settings:
+double W = 250;
+double H = 250;
+size_t ITERATIONS = 3;
+size_t RAYS = 100000;
+size_t DRAW_SAMPLES = 20;
+size_t S = 5;
+double DRAW_STD = 0.5 / S;
+````````````````````````````````````````````````````````
+
+This should produce the following image in a few seconds:
+
+![](images/fast.png)
+
+Below is the full source code including the scene description. You can also
+<a href="smallradiosity.zip">download</a> a package including the source, the rendered image and the pdf.
+
+````````````````````````````````````````````````````````
+#include <algorithm>
+#include <functional>
+#include <numeric>
+#include <random>
+#include <valarray>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+using namespace std;
+// Fast settings:
+const auto S            = 20;           // Number of patches per rect is S*S.           // SCENE
+const auto PHOTONS      = 10000;        // 300000;//30000;  // Number of particles used for each color component    // COMPUTE RADIOSITY
+const auto DRAW_SAMPLES = 20;           // Number of gaussian samples used for drawing. // RENDERING
+const auto WIDTH        = 250.0;        // Width of image       // RENDERING
+const auto HEIGHT       = 250.0;        // Height of image      // RENDERING
+// Slow settings:
+//const auto S            = 64;//30;    // Number of patches per rect is S*S.
+//const auto PHOTONS      = 100000000;  // Number of particles used for each color component
+//const auto DRAW_SAMPLES = 100;        // Number of gaussian samples used for drawing.
+//const auto WIDTH        = 4096.0;     // Width of image
+//const auto HEIGHT       = 4096.0;     // Height of image
+auto g = bind(      normal_distribution<double>(), mt19937());
+auto u = bind(uniform_real_distribution<double>(), mt19937());
+// Definition of vector type:
+using vec = valarray<double>;
+double dot(vec a, vec b)
+{
+    return (a * b).sum();
+}
+vec normalized(vec v)
+{
+    return v / sqrt(dot(v, v));
+}
+vec crossProduct(vec x, vec y)
+{
+    return vec{x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]};
+}
+// Used to describe the geometrical properties of a rectangular surface:
+struct Rect
+{
+    vec p;      // A corner in the rectangle.
+    vec x;      // Vector going from p to the right nearby corner.
+    vec y;      // Vector going from p to the top nearby corner.
+    vec n;      // Normal of the plane. The cross product of x and y.
+    vec xn;     // normalized(x).
+    vec yn;     // normalized(y).
+    vec nn;     // normalized(n).
+    double a;   // Area of rectangle. Given by length of x cross y.
+    Rect(vec P, vec X, vec Y) : p{P}, x{X}, y{Y}, n{crossProduct(x, y)},
+        xn{normalized(x)}, yn{normalized(y)}, nn{normalized(n)}, a{sqrt(dot(n, n))} {}
+};
+const auto L = 555.0; // Length of Cornell Box side.
+struct Scene // Define the Cornell box:
+{
+    static const auto NUM_RECTANGLES = 15;
+    static const auto NUM_PATCHES = NUM_RECTANGLES * S * S;
+
+    Rect rectangles[NUM_RECTANGLES] = {
+        Rect{ vec{ 0, 0, 0 }, vec{  0, 0, L }, vec{ L, 0, 0 } },    // Floor
+        Rect{ vec{ 0, L, 0 }, vec{  L, 0, 0 }, vec{ 0, 0, L } },    // Ceiling
+        Rect{ vec{ L, 0, L }, vec{ -L, 0, 0 }, vec{ 0, L, 0 } },        // Back wall
+        Rect{ vec{ 0, 0, 0 }, vec{  0, L, 0 }, vec{ 0, 0, L } },    // Right wall
+        Rect{ vec{ L, 0, 0 }, vec{  0, 0, L }, vec{ 0, L, 0 } },    // Left wall
+        // Tall block:
+        Rect{ vec{ 314, 330, 454 }, vec{  158, 0,  -49 }, vec{ -49,   0, -158 } },
+        Rect{ vec{ 314,   0, 454 }, vec{  158, 0,  -49 }, vec{   0, 330,    0 } },
+        Rect{ vec{ 423,   0, 247 }, vec{ -158, 0,   49 }, vec{   0, 330,    0 } },
+        Rect{ vec{ 265,   0, 296 }, vec{   49, 0,  158 }, vec{   0, 330,    0 } },
+        Rect{ vec{ 472,   0, 405 }, vec{  -49, 0, -158 }, vec{   0, 330,    0 } },
+        // Short block:
+        Rect{ vec{  81, 165, 223 }, vec{  158, 0,   49 }, vec{  49,   0, -158 } },
+        Rect{ vec{  81,   0, 223 }, vec{  158, 0,   49 }, vec{   0, 165,    0 } },
+        Rect{ vec{ 288,   0, 114 }, vec{ -158, 0,  -49 }, vec{   0, 165,    0 } },
+        Rect{ vec{ 130,   0,  65 }, vec{  -49, 0,  158 }, vec{   0, 165,    0 } },
+        Rect{ vec{ 239,   0, 272 }, vec{   49, 0, -158 }, vec{   0, 165,    0 } } };
+
+    // The color quantities for each patch:
+    // TODO: rename?
+    valarray<vec> R{ .75 * vec{ 1, 1, 1 }, NUM_PATCHES }; // Reflectance for each patch
+    valarray<vec> B{       vec{ 0, 0, 0 }, NUM_PATCHES }; // Radiosity for each patch
+
+    vec lightPos   =    L * vec{ .5, .8, .5 };
+    vec lightPower = 1e11 * vec{  1,  1,  1 };
+
+    Scene()
+    {
+        fill(&R[3 * S * S], &R[4 * S * S], vec{ .25, .75, .25 }); // Color right wall
+        fill(&R[4 * S * S], &R[5 * S * S], vec{ .75, .25, .25 }); // Color left wall
+    }
+};
+// Information about an intersection between a ray and a Rect:
+struct Intersection
+{
+    double distance;
+    double u; // 0-1 coordinate of the intersection within the rectangle.
+    double v; // 0-1 coordinate of the intersection within the rectangle.
+    vec position;
+    int rectangleIndex;
+    Intersection() : distance{numeric_limits<double>::max()} {}
+    operator bool() const { return distance < numeric_limits<double>::max(); }
+};
+// Compute the first intersection along a ray:
+Intersection ComputeIntersection(const Scene& scene, vec start, vec dir)
+{
+    const auto e = 0.0001;
+    start += e * dir;
+    dir = normalized(dir);
+    auto firstIntersection = Intersection();
+    for (auto r = 0; r < Scene::NUM_RECTANGLES; ++r)
+    {
+        const auto& rectangle = scene.rectangles[r];
+        auto i = Intersection();
+        i.distance = dot(rectangle.p - start, rectangle.nn) / dot(dir, rectangle.nn);
+        if (i.distance < 0 || firstIntersection.distance < i.distance)
+            continue;
+        i.rectangleIndex = r;
+        i.position = start + i.distance * dir;
+        const auto p = i.position - rectangle.p;
+        i.u = dot(p, rectangle.x) / dot(rectangle.x, rectangle.x);
+        i.v = dot(p, rectangle.y) / dot(rectangle.y, rectangle.y);
+        if (0 - e < i.u && i.u < 1 + e && 0 - e < i.v && i.v < 1 + e)
+            firstIntersection = i;
+    }
+    return firstIntersection;
+}
+int RectToPatch(int rect_index, int rect_patch_u, int rect_path_v)
+{
+    return rect_patch_u + rect_path_v * S + rect_index * S * S;
+}
+// Get patch index of an intersection, with an optional u and v offset:
+int Patch(const Intersection& i, double du = 0, double dv = 0)
+{
+    const auto rect_path_u = max(min(int((i.u + du) * S), S - 1), 0);
+    const auto rect_path_v = max(min(int((i.v + dv) * S), S - 1), 0);
+    return RectToPatch(i.rectangleIndex, rect_path_u, rect_path_v);
+}
+// Get an "interpolated" value for the radiosity using gaussian samples:
+vec Radiosity(const Scene& scene, const Intersection& i)
+{
+    auto r = vec{0, 0, 0};
+    if (!i)
+        return r;
+    //return B[Patch(i)]; // No interpolation
+    // Gaussian filter:
+    const auto DRAW_STD = 0.5 / S; // STD of gaussian filter.
+    for (auto s = 0; s < DRAW_SAMPLES; ++s)
+        r += scene.B[Patch(i, DRAW_STD * g(), DRAW_STD * g())];
+    return r / double(DRAW_SAMPLES);
+}
+vec RandomDiffuseReflectionDirection(vec tangent1, vec tangent2, vec normal)
+{
+    const auto a = u();
+    const auto dir = sqrt(a) * normalized(vec{g(), g(), 0}) + vec{0, 0, sqrt(1 - a)};
+    return tangent1 * dir[0] + tangent2 * dir[1] + normal * dir[2];
+}
+vec RandomDirection()
+{
+    return normalized(vec{ g(), g(), g() });
+}
+bool PhotonIsAbsorbed(double reflectance)
+{
+    return u() > reflectance;
+}
+const auto NUM_COLOR_CHANNELS = 3;
+// Compute the radiosity of the scene by bouncing around photons.
+void ComputeRadiosity(Scene& scene)
+{
+    for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
+    {
+        for (auto p = 0; p < PHOTONS; ++p)
+        {
+            auto ray_dir = RandomDirection();
+            auto ray_start = scene.lightPos;
+            auto i = ComputeIntersection(scene, ray_start, ray_dir);
+            while (i && !PhotonIsAbsorbed(scene.R[Patch(i)][c]))
+            {
+                const auto& r = scene.rectangles[i.rectangleIndex];
+                scene.B[Patch(i)][c] += scene.lightPower[c] / PHOTONS * S * S / r.a;
+                ray_dir = RandomDiffuseReflectionDirection(r.xn, r.yn, r.nn);
+                ray_start = i.position;
+                i = ComputeIntersection(scene, ray_start, ray_dir);
+            }
+        }
+    }
+}
+// Do gamma correction and truncation of color:
+int ScreenColor(double c)
+{
+    return min(int(pow(c, 1 / 2.2)), 255);
+}
+// Render the image to a ppm-file:
+void Render(const Scene& scene, vec cameraPos, double focalLength, const char* filename)
+{
+    ofstream file(filename);
+    file << "P3\n" << int(WIDTH) << " " << int(HEIGHT) << "\n255\n";
+    for (auto y = 0.0; y < HEIGHT; ++y)
+    {
+        for (auto x = 0.0; x < WIDTH; ++x)
+        {
+            const auto rayDir = vec{WIDTH / 2 - x, HEIGHT / 2 - y, focalLength};
+            const auto color = Radiosity(scene, ComputeIntersection(scene, cameraPos, rayDir));
+            for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
+                file << ScreenColor(color[c]) << " ";
+        }
+    }
+}
+void SaveLightmaps(const Scene& scene, const char* fileNameStart)
+{
+    for (auto r = 0; r < Scene::NUM_RECTANGLES; ++r)
+    {
+        auto ss = stringstream();
+        ss << fileNameStart << r << ".ppm";
+        auto file = ofstream(ss.str());
+        file << "P3" << endl << S << " " << S << endl << 255 << endl;
+        for (auto y = 0; y < S; ++y)
+        {
+            for (auto x = 0; x < S; ++x)
+            {
+                const auto color = scene.B[RectToPatch(r, x, y)];
+                for (auto c = 0; c < NUM_COLOR_CHANNELS; ++c)
+                    file << ScreenColor(color[c]) << " ";
+            }
+        }
+    }
+}
+// Here we go:
+int main()
+{
+    auto scene = Scene();
+    cout << "Computing radiosity." << endl;
+    ComputeRadiosity(scene);
+    cout << "Saving lightmaps to files." << endl;
+    SaveLightmaps(scene, "lightmap");
+    cout << "Rendering image to file." << endl;
+    const auto focalLength = 1.4 * WIDTH;
+    const auto cameraPos = L * vec{.5, .5, -1.4};
+    Render(scene, cameraPos, focalLength, "image.ppm");
+}
+````````````````````````````````````````````````````````
+
+# Theory
+
+# An Introduction to Global Illumination Radiosity
+
+# Introduction
+
+Radiosity is a method to render a scene realistically by simulating the laws of physics. It computes a viewpoint independent representation of the illumination. A useful application of it is to precompute light-maps for a static scene, i.e. surface textures containing the illumination. These can then be used with a standard rasterizer, like OpenGL or Direct3D, to render the scene in real-time from different viewpoints. This paper has two parts. The first part deals with the theory. It assumes that you are familiar with vector algebra in 3D and that you know about the normal distribution. The second part explains a simple but complete implementation, written in only 200 lines of C++ code, using only the standard library. We use the Cornell box as an example scene that we render (figure [pathes] and figure [interpolated_pathes]).
+
+ ![Figure [pathes]: The Cornell box rendered using the radiosity method. The surfaces of the scene are discretized into small patches for which the illumination is computed.](images/renderingDiscrete.png) ![Figure [interpolated_pathes]: The illumination is interpolated between patches to get a smoother visualization.](images/rendering.png)
+
+# Theory
+
+Radiosity is a method to render a scene realistically by simulating the laws of physics. To simplify this simulation it makes two assumptions:
+* That all surfaces can be discretized into surface patches that are small enough to have a constant illumination (figure figure [pathes] and figure [interpolated_pathes]).
+* That all surfaces are perfectly diffuse (figure [diffuse_specular]). Such surfaces have the property that a surface point looks the same no matter the viewing angle.
+
+These assumptions make it tractable to compute the illumination in a viewpoint independent way. We can compute the illumination without modeling the camera. This is possible since we only need to compute the illumination for a finite number of patches instead of infinitely many surface points. Also, since the surfaces are perfectly diffuse the perceived color and intensity of a surface point does not depend on the viewing/camera position.
+
+![Figure [diffuse_specular]: Three objects with the same shape but different materials. The left is perfectly diffuse. The right is perfectly specular. The middle is somewhere inbetween. The radiosity method assumes that all surfaces are perfectly diffuse.](images/diffuse_specular.png)
+
+The main quantity used in the radiosity simulation is itself called radiosity. The quantity radiosity is denoted $B_i^c$ and describes the energy of the light leaving a patch $i$ per second per surface area. It therefore has the unit $Js^{-1}m^{-2}$. To handle color we divide the light into different color components, e.g. red, green, blue. The index $c$ denotes the color component of the radiosity. It turns out that this quantity corresponds closely to how we perceive a surface point, i.e. the color and intensity we perceive it to have when it is illuminated.  The goal of the radiosity algorithm is thus to compute the radiosity $B_i^c$ for each patch $i$ of the scene and each color component $c$.
+
+Computing the radiosity of a scene typically takes a long time. A useful application of the algorithm is to precompute the illumination for static scenes. Then the radiosity of the surfaces are computed once and stored in light-maps, i.e. textures. Then a standard rasterizer, e.g. OpenGL or Direct3D, can be used to render the static illuminated scene from different viewpoints in real-time, using the precomputed light-map textures.
+
+# The Discrete Diffuse Rendering Equation
+
+The goal of the radiosity algorithm is to compute the radiosity $B_i^c$ for each patch $i$ and color component $c$. This completely describes the illumination of the scene. To explain the algorithm it is illustrative to divide the radiosity for each patch into two terms:
+\begin{equation} \label{EQ_Render1}
+B_i^c=E_i^c+R_i^c
+\end{equation}
+The first term is the radiosity emitted by the surface itself, which is only non-zero for the light sources of the scene. We assume that we know this term, i.e. that the scene description that we have defines the light sources and their strength for each color component. The second term is the light reflected by the patch. This term is more complex.
+
+To start analyzing the reflected light $R_i^c$ we let $H_i^c$ denote the incoming light. Depending on the material properties of a patch it might reflect more or less of the incoming light. We let $\rho_i^c$ denote the fraction of incoming light of color component $c$ that gets reflected by patch $i$. This dimension-less quantity is called reflectivity. A patch cannot reflect more than all incoming light and it cannot reflect less than zero so $0\leq \rho_i^c \leq 1$. Using this model the reflected light can be written:
+\begin{equation} \label{EQ_Render2}
+R_i^c=\rho_i^c H_i^c
+\end{equation}
+We assume we know the reflectivity $\rho_i^c$, i.e. that the scene description defines the "unlit color" of all surfaces. Then the problem for us is to compute the incoming light. This is the sum of the light coming in to patch $i$ from any other visible patch $j$. However, this will depend on the final illumination, i.e. radiosity $B_j^c$ of any other patch $j$ that is visible from patch $i$. 
+We can write this as:
+\begin{equation} \label{EQ_Render3}
+H_i^c=\sum_j F_{i,j} B_j^c
+\end{equation}
+where $F_{i,j}$ are coefficients that describe how the total light leaving patch $j$ effects the incoming light to patch $i$. These dimension-less coefficients $F_i,j$ are called form-factors. They describe how much one patch "sees" of another patch, which is dependent on the distance and angle between them and if any other patch is occluding. Note that the form-factors $F_{i,j}$ are geometrical quantities and thus the same for all color components of light.
+
+We do not assume that the form factors are given explicitly as part of the scene description, but given the position and orientation of all patches they can be computed. This computation is one of the major steps of the radiosity algorithm and we will discuss this in section sub section [Computing Form Factors]. For now we assume that they have been computed. We then have everything needed to formulate the final rendering equation for discrete diffuse scenes, also known as the radiosity equation system. If we combine equation  \ref{EQ_Render1}, \ref{EQ_Render2}, \ref{EQ_Render3} we get:
+\begin{equation} \label{EQ_Render4}
+B_i^c=E_i^c+\rho_i^c \sum_j F_{i,j} B_j^c
+\end{equation}
+This is a system of linear equations of the unknowns $B_i^c$, which describe the final illumination of the scene. If the coefficients $E_i^c,\rho_i^c,F_{i,j}$ are known we can solve for $B_i^c$ since we have as many equations as unknown.
+
+# Solving the Linear System of Equations
+
+The standard way to solve a system of linear equations is to express it on the standard form: $Ax=b$, where $A$ is a matrix, $b$ a vector and $x$ is the unknown vector. Then the solution can be expressed using the inverse of the matrix: $x=A^{-1}b$. This solution can also be used for the radiosity equation, but it is not efficient if $A$ is a very large matrix, which is typically the case for us. For instance, if we discretize the scene into $10^4$ patches, $A$ will be a square matrix with $10^4\times10^4=10^8$ elements.
+
+To solve the radiosity equation more efficiently the iterative Gauss-Seidel method can be used. We initialize all $B_i^c$ to zero. Then, for each iteration of the algorithm we iterate through all patches $i$ and color components $c$ and updates the radiosities $B_i^c$ using equation \ref{EQ_Render4}. This simple iterative approach cannot be used to solve all systems of linear equations, but it can always be used for the radiosity equation. In general it can be used for systems that fulfill the mathematical property of being diagonally dominant. The reason this holds for the radiosity equation is because $0 \leq \rho_i^c \leq 1$ and $0 \leq F_{i,j} \leq 1$.
+
+This iterative approach can also be motivated and explained from a physical point of view. Each iterative update corresponds to one bounce/reflection of light. As we do more and more iterations we simulate more and more reflections of light. For each reflection some of the light will be absorbed $0 \leq \rho_i^c \leq 1$ and after many reflections there will be very little light left bouncing around in the scene. In practice we might get a converged solution after $10-30$ iterations.
+
+## Computing Form Factors
+
+In the previous sections we introduced the radiosity equation and described how it can be solved to get the illumination of the scene. This requires that we know all the coefficients of the equation. The strength of the light sources $E_i^c$ and the material properties of the surfaces $\rho_i^c$ are usually given explicitly by the scene description that we have. The form factors on the other hand, need to be computed. The form factors $F_{i,j}$ describe for each patch $i$ how much of the light leaving another patch $j$ that reaches it. This is a purely geometrical propertiy that just depends on the positions of the patches.
+
+One relatively simple and intuitive way to compute the form factors is based on casting a lot of random rays through the scene and looking at their intersections with the patches. Let $\tilde F_{i,j}$ be the number of rays going directly from patch $i$ to patch $j$, i.e. without hitting any other occluding patch. Let $N_i$ be the total number of rays intersecting patch $i$. Then the form factors can be approximated as the fraction:
+\begin{equation} \label{EQ_FormFactors}
+F_{i,j} \approx \frac{ \tilde F_{i,j} }{N_i}
+\end{equation}
+In the limit where we cast infinitely many rays the relation will be exact. This formulation of the form factor as a fraction explains why $0 \leq F_{i,j} \leq 1$.
+
+An important detail is that the random rays used to define and compute the form factors need to be distributed uniformly. They should be equally probable to pass through any point and they should be equally probable to have any direction. A practical way to generate such rays is to first consider a big sphere with radius $R$ surrounding the scene. We then first consider how to sample a point on the sphere uniformly. One way to do this is to sample three numbers $x,y,z$ from the normal distribution and then construct the point as:
+\begin{equation}
+p = R\frac{(x,y,z)}{\|(x,y,z)\|}
+\end{equation}
+It turns out that we can then sample a uniformly distributed line by taking two such samples of points on the sphere and connect them. Thus we compute all form factors by generating a lot of uniformly distributed lines passing through the scene and compute all their intersections with the patches. Thus we also need an algorithm to compute the intersection between a line and a patch. Typically the patches are triangles and we thus need to implement a line-triangle intersection algorithm. To make the intersection computations tractable when we have a lot of patches, we can store the patches in some hierarchical data structure that allows fast intersection queries, e.g. an octree or kD-tree.
+
+# Summary
+
+We now know how the radiosity method works. Its main steps are:
+1. Discretize the scene into a lot of small surface patches.
+2. Compute form factors by generating random lines and compute their intersections with the patches.
+3. Solve radiosity equation iteratively to get view independent illumination solution for the patches.
+4. Render the scene from a specific view using the computed illumination solution.
+
+So far we have not really discussed the fourth step. The result from the first three steps are the radiosities, i.e. the final color, for each patch. To render the scene from a specific view we need to determine for each pixel in the camera image which patch it sees. The two main approaches to do this are:
+* **Raytracing.** Trace the ray leaving each pixel of the camera image to see which patch it first intersects.
+* **Rasterization.** Assume the patches are planar polygons. Project the polygons to the camera plane by first projecting its vertices. Use the projected vertices to draw each polygon in 2D. Use a depth buffer to only draw visible surface points.
+
+In both approaches the radiosities can be interpolated to get a continuously varying illumination over the surfaces.
+
+# A Simple Implementation of Radiosity
+
+We will now discuss the details of implementing radiosity in practice. The language of choice will be C++. The aim is to write a fully working stand alone implementation using as little and as simple code as possible. The resulting 200 lines of source code can be seen at \url{http://www.csc.kth.se/~burenius/radiosity/}.
+
+## Vectors in 3D
+Our first concern is how to handle vectors in 3D. We would like to use these to represent positions, directions and colors. We would like to perform vector addition, subtraction, dot product, multiplication with scalar and normalization. For the colors we would also like to do element-wise multiplication of two vectors (equation \ref{EQ_Render2}).
+
+There are a lot of libraries that implement this functionality, but it would be nice if our code only requires standard libraries to compile. In this example we will therefore use the valarray container, which is part of the C++ standard template library. It can be used to represent vectors of any data type and dimension. It overloads the operators +, -, /, * to perform vector addition, subtraction, scalar division, scalar multiplication and element-wise multiplication of two vectors. We will mainly use vectors where the elements are of type double so we first define a more convenient name for this:
+````````````````````````````````````````````````````````
+typedef valarray<double> vec;
+````````````````````````````````````````````````````````
+We then define three functions to simplify our vector calculations:
+````````````````````````````````````````````````````````
+vec vec3( double x, double y, double z )
+{
+    double a[]={x,y,z};
+    return vec(a,3);
+}
+double dot( const vec& a, const vec& b )
+{
+    return (a*b).sum();
+}
+vec normalize( const vec& v )
+{
+    return v / sqrt( dot(v,v) );
+}
+````````````````````````````````````````````````````````
+The first function creates a 3D vector. The second function computes the dot product between two vectors of any dimension. The third function normalizes a vector of any dimension. If you plan to implement a bigger radiosity project where performance is crucial you might consider using another container optimized for vectors in 3D. However, this is all we need for this simple example.
+
+## Surface Geometry
+
+\begin{figure} \label{FIG_Parallelogram}
+\begin{center}
+\includegraphics[width=70mm]{quad.pdf}
+\end{center}
+\caption{The surfaces of the scene are modeled using parallelograms.}
+\end{figure}
+
+We next consider how to represent the geometry of the surfaces of the scene. To make things simple we assume that the scene consists of only parallelograms, i.e. rectangles that might be skew. This is all we need to render the Cornell box and it simplifies the handling of the patches. For each parallelogram we will later construct a grid of patches. For more general scenes one typically uses triangles to represent the scene geometry. Then the handling of the patches might be a bit more involved.
+
+We let our parallelograms be defined by the position of one of the corners $p$ and the relative position of the nearby right corner $x$ and the nearby top corner $y$ (figure \ref{FIG_Parallelogram}). We also store the normal $n$ of the surface which can be computed as the cross product of $x$ and $y$, since it should be orthogonal to both. We store a parallelogram in a data structure which we call Quad:
+````````````````````````````````````````````````````````
+struct Quad
+{
+   vec p;   
+   vec x;   
+   vec y;
+   vec n;
+   Quad( vec P, vec X, vec Y )
+   : p(P), x(X), y(Y),
+     n(vec3(x[1]*y[2]-x[2]*y[1],x[2]*y[0]-x[0]*y[2],x[0]*y[1]-x[1]*y[0])){}
+};
+````````````````````````````````````````````````````````
+All quads are stored in the array:
+````````````````````````````````````````````````````````
+Quad quads[];
+````````````````````````````````````````````````````````
+and a single quad can be referred to by an index into this array. We fill this array with Quads representing the Cornell Box data shown in figure [pathes]. We get the Cornell Box data from:
+[http://www.graphics.cornell.edu/online/box/](http://www.graphics.cornell.edu/online/box/) but modify it slightly to get perfectly right angles.
+
+## Intersection between Ray and Surface
+
+Since we use these quads to describe the surfaces of the scene we need to know how to compute the intersection between a ray and a quad. We do this by first computing the intersection between the line corresponding to the ray and the plane corresponding to the quad. The equation for any point $r$ lying in the plane can then be written:
+\begin{equation}
+n\cdot (r-p) = 0
+\end{equation}
+because the vector $r-p$ should be orthogonal to the normal $n$. The equation for the points $r$ lying on the line can be written:
+\begin{equation}
+r(t) = a + tb
+\end{equation}
+where $a$ is the start point of the ray and $b$ is a unit vector describing its direction. The scalar $t$ parametrizes the line and describes the distance to any point on the line $r(t)$ from the start point $a$. To get the intersection of the plane and the line we insert the equation of the line into the equation of the plane and solve for t:
+
+\begin{eqnarray}
+n\cdot (a + tb-p) &=& 0
+\nonumber\\
+tn\cdot b &=& n\cdot (p-a)
+\nonumber\\
+t &=& \frac{n\cdot (p-a)}{n\cdot b}
+\end{eqnarray}
+This gives us the distance $t$ from the start of the ray to the intersection. To have a meaningful intersection we require that the ray points towards the surface. This requirement can be expressed as:
+\begin{equation}
+n \cdot b < 0
+\end{equation}
+We also require that the intersection occurs after the start point of the ray, which can be expressed as:
+\begin{equation}
+t > 0
+\end{equation}
+Finally we require that the intersection of the line and the plane occurs within the parallelogram. To test this we first compute the vector representing the intersection point in a coordinate system centered at $p$:
+\begin{equation}
+r' = r - p = a + tb - p;
+\end{equation}
+To get the texture coordinates $(u,v)$ within the parallelogram we project $r'$ on $x$ and $y$:
+\begin{eqnarray}
+u = \frac{r' \cdot x}{x \cdot x}
+\\
+v = \frac{r' \cdot y}{y \cdot y}
+\end{eqnarray}
+The intersection occurs within the parallelogram if:
+\begin{eqnarray}
+0 < u < 1
+\\
+0 < v < 1
+\end{eqnarray}
+To store detected intersection we use the data type:
+````````````````````````````````````````````````````````
+struct Intersection
+{
+    double dist,u,v;
+    size_t quad;
+    bool front;
+    bool operator<( Intersection& i ) { return dist < i.dist; }
+};
+````````````````````````````````````````````````````````
+It stores the distance from the start of the ray to the intersection, its coordinates $(u,v)$ within the parallelogram and if the ray intersected the front of the surface. We define the smaller-than-operator $<$ so that we can easily sort intersections depending on their distance from the start of the ray. The intersection computations are handled by the function:
+````````````````````````````````````````````````````````
+list<Intersection> ComputeIntersections( vec start, vec dir )
+````````````````````````````````````````````````````````
+It takes the start and direction of a ray as arguments and test against all quads for intersections. A list of all intersections is returned. This list is unsorted but we can easily sort it using standard functions since the operator $<$ has been defined:
+````````````````````````````````````````````````````````
+list<Intersection> i = ComputeIntersections( start, dir );
+i.sort();
+````````````````````````````````````````````````````````
+or just find the closest intersection:
+````````````````````````````````````````````````````````
+list<Intersection> i = ComputeIntersections( start, dir );
+Intersection closest = *min_element(i.begin(),i.end());
+````````````````````````````````````````````````````````
+
+## Patches
+
+We discretize each quad into $S \times S$ patches. If $Q$ is the number of quads of the scene the number of patches will be $P=QS^2$. For each patch $i$ we need to store its reflectance $\rho_i^c$, emission $E_i^c$ and radiosity $B_i^c$. We use three valarrays of size $P$ to do this, where each element is of type vec and represents the three color components for a patch:
+````````````````````````````````````````````````````````
+valarray<vec> R( .75*vec3(1,1,1), P );
+valarray<vec> E(     vec3(0,0,0), P );
+valarray<vec> B(     vec3(0,0,0), P ); 
+````````````````````````````````````````````````````````
+All reflectances $\rho_i^c$ are initialized to 0.75, which corresponds to a white looking surface. All radiosities and emissions are initialized to zero. We will later change the reflectances for some surfaces of the scene to let them be colored. We will also change the emission for some of the surfaces so that they become the light sources that illuminate the scene. Each intersection has a quad index and a surface position $(u,v)$ and thus corresponds to a patch. The patch index that an intersection corresponds to is computed by:
+````````````````````````````````````````````````````````
+size_t Patch( Intersection& i, double du=0, double dv=0 )
+{
+    size_t ui = min( size_t((i.u+du)*S), S-1 );
+    size_t vi = min( size_t((i.v+dv)*S), S-1 );
+    return ui + vi*S + i.quad*S*S;
+}
+````````````````````````````````````````````````````````
+We will later see that it can sometimes be useful to offset the surface position $(u,v)$, i.e. to get the patch index for a surface point that is close to the intersection. When we want this the optional arguments du and dv can be sent to the function to specify this offset.
+
+## Form Factors
+
+The form factors for each ordered pair of patches are stored in:
+````````````````````````````````````````````````````````
+valarray<valarray<double>> F( valarray<double>(0.,P), P );
+````````````````````````````````````````````````````````
+It is of size P by P and all elements are initialized to zero. We access $F_{i,j}$ by writing F[i][j]. The form factors are computed as described in section sub section [Computing Form Factors] sub section [Computing Form Factors] by the function:
+````````````````````````````````````````````````````````
+void ComputeFormFactors()
+````````````````````````````````````````````````````````
+We sample lines uniformly by sampling pairs of points on a sphere bounding the scene. The Cornell Box is a cube with side $L$ and has its center at $0.5(L,L,L)$. A sphere bounding the scene will have the same center and the radius $0.5L\sqrt{3}$. To generate a line we first sample two points on the unit sphere with:
+````````````````````````````````````````````````````````
+vec p1 = normalize(vec3(n(),n(),n()));
+vec p2 = normalize(vec3(n(),n(),n()));
+````````````````````````````````````````````````````````
+where the function n() samples from the normal distribution. We then transform these points to the sphere bounding the scene. The start point of the line/ray becomes:
+````````````````````````````````````````````````````````
+vec start = 0.5*L*(vec3(1,1,1) + sqrt(3.)*p1);
+````````````````````````````````````````````````````````
+The direction does not change if we translate and scale the sphere so it can be computed directly:
+````````````````````````````````````````````````````````
+vec dir = p2 - p1;
+````````````````````````````````````````````````````````
+We then use the function ComputeIntersections to get a list of all intersections along this ray, which we sort to get the intersections in order:
+````````````````````````````````````````````````````````
+list<Intersection> intersections = ComputeIntersections( start, dir );
+if( intersections.empty() )
+    continue;
+intersections.sort();
+````````````````````````````````````````````````````````
+We then iterate through this list to see which patches that directly see each other along the ray. We look at pairs $(a,b)$ of patches:
+````````````````````````````````````````````````````````
+list<Intersection>::iterator a = intersections.begin();
+list<Intersection>::iterator b = ++intersections.begin();
+++rays[Patch(*a)];
+for( ; b != intersections.end(); ++a, ++b )
+{   
+    ++rays[Patch(*b)];
+    if( !a->front && b->front )
+    {
+        ++F[Patch(*a)][Patch(*b)];
+        ++F[Patch(*b)][Patch(*a)];
+    }
+}
+````````````````````````````````````````````````````````
+The surfaces need to face each other to see each other. If this is true we increase the corresponding counters. After this has been done for all generated lines the form factors are normalized according to the definition in equation \ref{EQ_FormFactors}:
+````````````````````````````````````````````````````````
+F[i][j] /= max(rays[i],1.);
+````````````````````````````````````````````````````````
+The max function is used to handle the case where zero lines intersected patch $i$. In that case we divide with 1 instead of 0 which is undefined.  This happens if we do not generate enough lines to "fill" all of the scene.
+
+## Solving the Radiosity Equation
+
+After all form factors have been computed we are ready to compute the radiosities for each patch. This is done in the function:
+
+````````````````````````````````````````````````````````
+void ComputeRadiosity()
+{
+}
+````````````````````````````````````````````````````````
+
+Remember that we initialized the radiosities to zero. This updates the radiosities iteratively using the Gauss-Seidel method by just applying equation \ref{EQ_Render4}. The summation representing the incoming light $H_i^c$ (equation \ref{EQ_Render3}) can be seen as an inner product between $B$ and one row of $F$:
+\begin{eqnarray}
+B^c &=& (B_1^c, B_2^c, \dots, B_P^c ) \\
+F_i &=& (F_{i,1}, F_{i,2}, \dots, F_{i,P} ) \\
+H_i^c &=& \sum_j F_{i,j} B_j^c = F_i \cdot B^c
+\end{eqnarray}
+
+## Drawing
+
+![Figure [gauss_sampling]: The computed radiosities for some patches. The cross corresponds to the intersection between a ray and the surface. Instead of just sampling the radiosity at the intersection point we can get a smoother estimate by sampling some random points around it. The sampling points are obtained from a normal distribution centerd at the intersection point.](images/gauss_sampling.png)
+
+The final step after all radiosities have been computed is to render the scene. We use raytracing to do this since it is simple, although a bit slow. If we would have wanted real-time visualization we could have used rasterization instead, e.g. by using libraries like OpenGL and DirectX that fully utilize the parallel architecture of the graphics card. The simpler visualization using raytracing is implemented with the following lines of code:
+````````````````````````````````````````````````````````
+void Draw()
+{
+    ofstream f("image.ppm");
+    f << "P3\n" << int(W) << " " << int(H) << "\n255\n";
+    for( double y=0; y < H; ++y )
+    {
+        for (double x=0; x < W; ++x)
+        {
+            vec pixelDir = vec3( W/2-x, H/2-y, focalLength );
+            list<Intersection> i = ComputeIntersections( cameraPos, pixelDir );
+            vec color = vec3(0,0,0);
+            if( !i.empty() )
+                color = InterpolateRadiosity( *min_element(i.begin(),i.end()) );
+            for( size_t c=0; c<3; ++c )
+                f << ScreenColor( color[c] ) << " ";
+        }
+    }
+}
+````````````````````````````````````````````````````````
+
+First we create the file "image.ppm" which we will write the resulting image to. This image format is very easy to write and can be read by e.g. Adobe Photoshop. When drawing the image we loop over all pixels and for each pixel we compute the direction of the ray it corresponds to. The start of the ray is the camera center. We then use the function ComputeIntersections to get a list of all intersections along the ray. If the list is not empty we have intersected something and the nearest intersection is retrieved using the function std::min\_element. We then compute the radiosity value of this intersection using the function:
+
+````````````````````````````````````````````````````````
+vec InterpolateRadiosity(Intersection& i)
+{
+    vec r = vec3(0,0,0);
+    for (size_t s=0; s < DRAW_SAMPLES; ++s)
+        r += B[ Patch(i,DRAW_STD*n(),DRAW_STD*n()) ];
+    return r / double(DRAW_SAMPLES);
+}
+````````````````````````````````````````````````````````
+
+If we did not want interpolation we could have just gotten the radiosity of the patch corresponding to the intersection by writing:
+
+````````````````````````````````````````````````````````
+B[ Patch(i) ]
+````````````````````````````````````````````````````````
+
+The result without interpolation can be seen to the left in figure figure [pathes] and figure [interpolated_pathes]. To get a smoother result InterpolateRadiosity samples the radiosity randomly around the intersection point and compute the average value of our samples. In this way when we are close to the border between two patches the samples will take the radiosity of both patches into account. The random offsets relative the intersection point are drawn from the normal distribution (figure [gauss_sampling]). We now have the physical color of the pixel. Finally, we convert each color component to a "screen space" color by doing gamma correction and truncating it to be an integer in the interval 0-255:
+
+````````````````````````````````````````````````````````
+int ScreenColor( double c )
+{
+    return min( int(pow(c,1/2.2)), 255 ); 
+}
+````````````````````````````````````````````````````````
+
+The final result can be seen to the right in figure figure [pathes] and figure [interpolated_pathes].
+
+
+
+<!-- Markdeep: --><style class="fallback">body{visibility:hidden;white-space:pre;font-family:monospace}</style><script src="markdeep.min.js"></script><script src="https://casual-effects.com/markdeep/latest/markdeep.min.js"></script><script>window.alreadyProcessedMarkdeep||(document.body.style.visibility="visible")</script>
