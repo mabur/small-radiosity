@@ -1,0 +1,4 @@
+language: cpp
+script:
+  - ./build.sh
+  - ./build/small_radiosity
