@@ -226,7 +226,7 @@ void saveLightmaps(const Scene& scene)
     for (auto r = 0; r < Scene::NUM_RECTANGLES; ++r)
     {
         const auto filename = "lightmap" + std::to_string(r) +  ".ppm";
-        auto file = ofstream(filename);
+        ofstream file(filename);
         file << "P3" << endl << S << " " << S << endl << 255 << endl;
         for (auto y = 0; y < S; ++y)
         {
