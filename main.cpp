@@ -38,7 +38,7 @@ vec normalized(vec a)
 }
 vec crossProduct(vec a, vec b)
 {
-    return vec{a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
+    return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
 }
 // Used to describe the geometrical properties of a rectangular surface:
 struct Rect
@@ -70,23 +70,23 @@ struct Scene // Define the Cornell box:
     }
 
     Rect rectangles[NUM_RECTANGLES] = {
-        Rect{ vec{ 0, 0, 0 }, vec{  0, 0, L }, vec{ L, 0, 0 } },    // Floor
-        Rect{ vec{ 0, L, 0 }, vec{  L, 0, 0 }, vec{ 0, 0, L } },    // Ceiling
-        Rect{ vec{ L, 0, L }, vec{ -L, 0, 0 }, vec{ 0, L, 0 } },	// Back wall
-        Rect{ vec{ 0, 0, 0 }, vec{  0, L, 0 }, vec{ 0, 0, L } },    // Right wall
-        Rect{ vec{ L, 0, 0 }, vec{  0, 0, L }, vec{ 0, L, 0 } },    // Left wall
+        Rect{ { 0, 0, 0 }, {  0, 0, L }, { L, 0, 0 } }, // Floor
+        Rect{ { 0, L, 0 }, {  L, 0, 0 }, { 0, 0, L } }, // Ceiling
+        Rect{ { L, 0, L }, { -L, 0, 0 }, { 0, L, 0 } }, // Back wall
+        Rect{ { 0, 0, 0 }, {  0, L, 0 }, { 0, 0, L } }, // Right wall
+        Rect{ { L, 0, 0 }, {  0, 0, L }, { 0, L, 0 } }, // Left wall
         // Tall block:
-        Rect{ vec{ 314, 330, 454 }, vec{  158, 0,  -49 }, vec{ -49,   0, -158 } },
-        Rect{ vec{ 314,   0, 454 }, vec{  158, 0,  -49 }, vec{   0, 330,    0 } },
-        Rect{ vec{ 423,   0, 247 }, vec{ -158, 0,   49 }, vec{   0, 330,    0 } },
-        Rect{ vec{ 265,   0, 296 }, vec{   49, 0,  158 }, vec{   0, 330,    0 } },
-        Rect{ vec{ 472,   0, 405 }, vec{  -49, 0, -158 }, vec{   0, 330,    0 } },
+        Rect{ { 314, 330, 454 }, {  158, 0,  -49 }, { -49,   0, -158 } },
+        Rect{ { 314,   0, 454 }, {  158, 0,  -49 }, {   0, 330,    0 } },
+        Rect{ { 423,   0, 247 }, { -158, 0,   49 }, {   0, 330,    0 } },
+        Rect{ { 265,   0, 296 }, {   49, 0,  158 }, {   0, 330,    0 } },
+        Rect{ { 472,   0, 405 }, {  -49, 0, -158 }, {   0, 330,    0 } },
         // Short block:
-        Rect{ vec{  81, 165, 223 }, vec{  158, 0,   49 }, vec{  49,   0, -158 } },
-        Rect{ vec{  81,   0, 223 }, vec{  158, 0,   49 }, vec{   0, 165,    0 } },
-        Rect{ vec{ 288,   0, 114 }, vec{ -158, 0,  -49 }, vec{   0, 165,    0 } },
-        Rect{ vec{ 130,   0,  65 }, vec{  -49, 0,  158 }, vec{   0, 165,    0 } },
-        Rect{ vec{ 239,   0, 272 }, vec{   49, 0, -158 }, vec{   0, 165,    0 } } };
+        Rect{ {  81, 165, 223 }, {  158, 0,   49 }, {  49,   0, -158 } },
+        Rect{ {  81,   0, 223 }, {  158, 0,   49 }, {   0, 165,    0 } },
+        Rect{ { 288,   0, 114 }, { -158, 0,  -49 }, {   0, 165,    0 } },
+        Rect{ { 130,   0,  65 }, {  -49, 0,  158 }, {   0, 165,    0 } },
+        Rect{ { 239,   0, 272 }, {   49, 0, -158 }, {   0, 165,    0 } } };
 
     // The color quantities for each patch:
     valarray<vec> reflectance{ WHITE, NUM_PATCHES }; // Reflectance for each patch
@@ -165,7 +165,7 @@ vec sampleRadiosity(const Scene& scene, const Intersection& i)
 }
 vec randomDirection()
 {
-    return normalized(vec{ g(), g(), g() });
+    return normalized({ g(), g(), g() });
 }
 vec randomDiffuseReflectionDirection(vec tangent1, vec tangent2, vec normal)
 {
