@@ -1,25 +1,24 @@
 // small-radiosity by Magnus Burenius
 #include <algorithm>
 #include <functional>
+#include <fstream>
+#include <iostream>
 #include <numeric>
 #include <random>
 #include <valarray>
-#include <fstream>
-#include <iostream>
-#include <sstream>
 using namespace std;
 // Fast settings:
-const auto S            = 20;		    // Number of patches per rect is S*S.			// SCENE
-const auto PHOTONS      = 10000;	    // 300000;//30000;	// Number of particles used for each color component	// COMPUTE RADIOSITY
-const auto DRAW_SAMPLES = 20;		    // Number of gaussian samples used for drawing.	// RENDERING
-const auto WIDTH        = 250.0;		// Width of image		// RENDERING
-const auto HEIGHT       = 250.0;		// Height of image		// RENDERING
+const auto S            = 20;		    // Number of patches per rect is S*S.
+const auto PHOTONS      = 10000;	    // Number of particles used for each color component.
+const auto DRAW_SAMPLES = 20;		    // Number of gaussian samples used for drawing.
+const auto WIDTH        = 250.0;		// Width of image.
+const auto HEIGHT       = 250.0;		// Height of image.
 // Slow settings:
-//const auto S            = 64;//30;    // Number of patches per rect is S*S.
-//const auto PHOTONS      = 100000000;  // Number of particles used for each color component
+//const auto S            = 64;         // Number of patches per rect is S*S.
+//const auto PHOTONS      = 100000000;  // Number of particles used for each color component.
 //const auto DRAW_SAMPLES = 100;        // Number of gaussian samples used for drawing.
-//const auto WIDTH        = 4096.0;     // Width of image
-//const auto HEIGHT       = 4096.0;     // Height of image
+//const auto WIDTH        = 4096.0;     // Width of image.
+//const auto HEIGHT       = 4096.0;     // Height of image.
 auto g = bind(      normal_distribution<double>(), mt19937());
 auto u = bind(uniform_real_distribution<double>(), mt19937());
 // Definition of vector type:
@@ -40,6 +39,11 @@ vec crossProduct(vec a, vec b)
 {
     return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
 }
+const auto NUM_COLOR_CHANNELS = 3;
+const auto BLACK = vec{ 0.00, 0.00, 0.00 };
+const auto WHITE = vec{ 0.75, 0.75, 0.75 };
+const auto RED   = vec{ 0.75, 0.25, 0.25 };
+const auto GREEN = vec{ 0.25, 0.75, 0.25 };
 // Used to describe the geometrical properties of a rectangular surface:
 struct Rect
 {
@@ -54,12 +58,9 @@ struct Rect
     Rect(vec P, vec X, vec Y) : p{P}, x{X}, y{Y}, n{crossProduct(x, y)},
         xn{normalized(x)}, yn{normalized(y)}, nn{normalized(n)}, a{ norm(n)} {}
 };
-const auto L = 555.0; // Length of Cornell Box side.
-const auto BLACK = vec{ 0, 0, 0 };
-const auto WHITE = vec{ .75, .75, .75 };
-const auto RED   = vec{ .75, .25, .25 };
-const auto GREEN = vec{ .25, .75, .25 };
-struct Scene // Define the Cornell box:
+// Define the scene which is a cubic room with two blocks inside:
+const auto L = 555.0; // Length of the side of the room.
+struct Scene
 {
     static const auto NUM_RECTANGLES = 15;
     static const auto NUM_PATCHES = NUM_RECTANGLES * S * S;
@@ -94,8 +95,8 @@ struct Scene // Define the Cornell box:
 
     Scene()
     {
-        fill(&reflectance[rectToPatch(3, 0, 0)], &reflectance[rectToPatch(4, 0, 0)], GREEN); // Color right wall
-        fill(&reflectance[rectToPatch(4, 0, 0)], &reflectance[rectToPatch(5, 0, 0)], RED); // Color left wall
+        fill(&reflectance[rectToPatch(3, 0, 0)], &reflectance[rectToPatch(4, 0, 0)], GREEN); // Color right wall.
+        fill(&reflectance[rectToPatch(4, 0, 0)], &reflectance[rectToPatch(5, 0, 0)], RED); // Color left wall.
     }
 };
 struct Light
@@ -119,7 +120,7 @@ struct Intersection
     Intersection() : distance{numeric_limits<double>::max()} {}
     operator bool() const { return distance < numeric_limits<double>::max(); }
 };
-// Compute the first intersection along a ray:
+// Find the first intersection along a ray:
 Intersection findIntersection(const Scene& scene, vec start, vec dir)
 {
     const auto e = 0.0001;
@@ -156,7 +157,7 @@ vec sampleRadiosity(const Scene& scene, const Intersection& i)
     auto r = BLACK;
     if (!i)
         return r;
-    //return B[patchIndex(i)]; // No interpolation
+    //return B[patchIndex(i)]; // No interpolation.
     // Gaussian filter:
     const auto DRAW_STD = 0.5 / S; // STD of gaussian filter.
     for (auto s = 0; s < DRAW_SAMPLES; ++s)
@@ -177,7 +178,6 @@ bool isPhotonAbsorbed(double reflectance)
 {
     return u() > reflectance;
 }
-const auto NUM_COLOR_CHANNELS = 3;
 // Compute the radiosity of the scene by bouncing around photons.
 void illuminateScene(Scene& scene, const Light& light)
 {
