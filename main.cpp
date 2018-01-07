@@ -136,7 +136,7 @@ Intersection findIntersection(const Scene& scene, vec start, vec dir)
             continue;
         i.rectangleIndex = r;
         i.position = start + i.distance * dir;
-        const auto p = vec{i.position - rectangle.p};
+        const vec p = i.position - rectangle.p;
         i.u = dot(p, rectangle.x) / dot(rectangle.x, rectangle.x);
         i.v = dot(p, rectangle.y) / dot(rectangle.y, rectangle.y);
         if (0 - e < i.u && i.u < 1 + e && 0 - e < i.v && i.v < 1 + e)
@@ -171,7 +171,7 @@ vec randomDirection()
 vec randomDiffuseReflectionDirection(vec tangent1, vec tangent2, vec normal)
 {
     const auto a = u();
-    const auto dir = vec{sqrt(a) * normalized({g(), g(), 0}) + vec{0, 0, sqrt(1 - a)}};
+    const vec dir = sqrt(a) * normalized({g(), g(), 0}) + vec{0, 0, sqrt(1 - a)};
     return tangent1 * dir[0] + tangent2 * dir[1] + normal * dir[2];
 }
 bool isPhotonAbsorbed(double reflectance)
